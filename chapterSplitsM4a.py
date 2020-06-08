@@ -27,7 +27,7 @@ def parseArgs():
             raise argparse.ArgumentTypeError("Invalid Directory path")
 
     parser = argparse.ArgumentParser(
-        description="Split Youtube m4a files with bookmarks using ffmpeg."
+        description="Split m4a files with bookmarks using ffmpeg."
     )
     parser.add_argument(
         "-d", "--dir", required=True, help="Directory path", type=dirPath
@@ -107,7 +107,7 @@ def main(pargs):
             printLogP(f"\nOutput directory name: {extractDirName}")
 
             if not isinstance(js["chapters"], Iterable):
-                print(f"\n\n\nSkipping {album}, Chapters info not found.")
+                printLogP(f"\n\n\nSkipping {album}, Chapters info not found.")
                 continue
 
             for i, chapter in enumerate(js["chapters"]):
