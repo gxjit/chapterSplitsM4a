@@ -33,10 +33,13 @@ def parseArgs():
         "-d", "--dir", required=True, help="Directory path", type=dirPath
     )
     parser.add_argument(
+        "-c", "--gen-cue", action="store_true", help="Generate cuesheet .cue instead of splits."
+    )
+    parser.add_argument(
         "-n",
         "--no-write",
         required=False,
-        help="Do not write anything to Disk / Dry run.",
+        help="Do not write anything to Disk(except logs) / Dry run.",
         action="store_true",
     )
     pargs = parser.parse_args()
@@ -68,12 +71,25 @@ slugifyP = fn.partial(
     save_order=True,
 )
 
+getFileList = lambda dirPath: [
+    x for x in dirPath.iterdir() if x.is_file() and ".info.json" in x.name
+]
+
+
+def HMSToMS(time):
+    timeArr = [int(e) for e in time.split(":")]
+    if timeArr[0] != 0:
+        for h in range(timeArr[0] - 1):
+            timeArr[1] += 60
+    timeStr = [str(e).zfill(2) for e in timeArr[1:]]
+    return ":".join(timeStr)
+
 
 def main(pargs):
 
     dirPath = pargs.dir.resolve()
 
-    fileList = [x for x in dirPath.iterdir() if x.is_file() and ".info.json" in x.name]
+    fileList = getFileList(dirPath)
 
     if not fileList:
         print("Nothing to do.")
@@ -92,7 +108,8 @@ def main(pargs):
         with open(file, "r", encoding="utf-8") as f:
             js = json.loads(f.read())
 
-        artist = js["creator"]
+        artist = js["creator"] or js["uploader"]
+
         album = js["title"]
 
         extractDirName = slugifyP(album)
@@ -100,7 +117,16 @@ def main(pargs):
         if not pargs.no_write:
             extractDir = makeTargetDirs(extractDirName, dirPath)
 
-        with open(dirPath.joinpath(f"{baseName}.log"), "w") as log:
+        if pargs.gen_cue:
+            cue = dirPath.joinpath(f"{baseName}.cue")
+            with open(cue, "w") as f:
+                f.write(f'\nPERFORMER "{artist}"')
+                f.write(f'\nTITLE "{album}"')
+                f.write(f'\nFILE "{m4aFile}" AAC')
+
+        logsDir = makeTargetDirs("logs", dirPath)
+
+        with open(logsDir.joinpath(f"{baseName}.log"), "w") as log:
             printLogP = fn.partial(printLog, logRef=log)
             printLogP("\n\n==============================")
             printLogP(f"\n\nProcessing {album}")
@@ -118,34 +144,41 @@ def main(pargs):
                 fileName = f"{track}. {slugifyP(title)}.m4a"
                 printLogP("\n\n------------------------------")
                 printLogP(f"\n\nProcessing {title} from {startTime} to {endTime}")
-                printLogP(f"Output file name: {fileName}")
+                printLogP(f"\nOutput file name: {fileName}")
                 if not pargs.no_write:
-                    subprocess.run(
-                        [
-                            "ffmpeg",
-                            "-ss",
-                            startTime,
-                            "-to",
-                            endTime,  # --ss -to need to be prior to -i
-                            "-i",
-                            m4aFile,
-                            "-c:a",
-                            "copy",
-                            "-metadata",
-                            f"track={track}",
-                            "-metadata",
-                            f"title={title}",
-                            "-metadata",
-                            f"artist={artist}",
-                            "-metadata",
-                            f"album_artist={artist}",
-                            "-metadata",
-                            f"album={album}",
-                            "-loglevel",
-                            "warning",
-                            path.join(extractDir, fileName),
-                        ]
-                    )
+                    if pargs.gen_cue:
+                        with open(cue, "a") as f:
+                            f.write(f"\n  TRACK {str(track).zfill(2)} AUDIO")
+                            f.write(f'\n    TITLE "{title}"')
+                            f.write(f"\n    INDEX 01 {HMSToMS(startTime)}:00 ")
+                    else:
+                        out = subprocess.check_output(  # check output
+                            [
+                                "ffmpeg",
+                                "-ss",
+                                startTime,
+                                "-to",
+                                endTime,  # --ss -to need to be prior to -i
+                                "-i",
+                                m4aFile,
+                                "-c:a",
+                                "copy",
+                                "-metadata",
+                                f"track={track}",
+                                "-metadata",
+                                f"title={title}",
+                                "-metadata",
+                                f"artist={artist}",
+                                "-metadata",
+                                f"album_artist={artist}",
+                                "-metadata",
+                                f"album={album}",
+                                "-loglevel",
+                                "warning",
+                                path.join(extractDir, fileName),
+                            ]
+                        ).decode("utf-8")
+                        printLogP(out)
         input("Press any key to continue processing.")
 
 
