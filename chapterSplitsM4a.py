@@ -11,11 +11,12 @@ import json
 import os
 import os.path as path
 import pathlib
+import re
 import subprocess
 import sys
+import time
+import unicodedata
 from collections.abc import Iterable
-
-from slugify import slugify
 
 
 def parseArgs():
@@ -33,7 +34,13 @@ def parseArgs():
         "-d", "--dir", required=True, help="Directory path", type=dirPath
     )
     parser.add_argument(
-        "-c", "--gen-cue", action="store_true", help="Generate cuesheet .cue instead of splits."
+        "-c",
+        "--gen-cue",
+        action="store_true",
+        help="Generate cuesheet .cue instead of splits.",
+    )
+    parser.add_argument(
+        "-fn", "--fn-tags", action="store_true", help="Infer tags from filenames.",
     )
     parser.add_argument(
         "-n",
@@ -41,6 +48,15 @@ def parseArgs():
         required=False,
         help="Do not write anything to Disk(except logs) / Dry run.",
         action="store_true",
+    )
+    parser.add_argument(
+        "-w",
+        "--wait",
+        nargs="?",
+        default=None,
+        const=10,
+        type=int,
+        help="Wait time in seconds between each iteration, default is 10",
     )
     pargs = parser.parse_args()
 
@@ -57,19 +73,55 @@ def makeTargetDirs(name, dirPath):
     return newPath
 
 
+def nSort(s, _nsre=re.compile("([0-9]+)")):
+    return [int(text) if text.isdigit() else text.lower() for text in _nsre.split(s)]
+
+
 def printLog(data, logRef):
     print(data)
     logRef.write(data)
 
 
-slugifyP = fn.partial(
-    slugify,
-    separator=" ",
-    lowercase=False,
-    replacements=([[":", "_"], ["-", "_"], ["[", "("], ["]", ")"]]),
-    regex_pattern=r"\)\(\.",
-    save_order=True,
-)
+def getInput():
+    print("\nPress Enter Key continue or input 'e' to exit.")
+    try:
+        choice = input("\n> ")
+        if choice not in ["e", ""]:
+            raise ValueError
+
+    except ValueError:
+        print("\nInvalid input.")
+        choice = getInput()
+
+    return choice
+
+
+def wait(sec):
+    print(f"\nWaiting for {str(sec)} seconds.\n>")
+    time.sleep(int(sec))
+
+
+def slugify(value, replace={}, keepSpace=True):
+    """
+    Adapted from django.utils.text.slugify
+    https://docs.djangoproject.com/en/3.0/_modules/django/utils/text/#slugify
+    """
+    replace.update({"[": "(", "]": ")", ":": "_"})
+    value = str(value)
+    value = (
+        unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
+    )
+
+    for k, v in replace.items():
+        value = value.replace(k, v)
+    value = re.sub(r"[^\w\s)(_-]", "", value).strip()
+
+    if keepSpace:
+        value = re.sub(r"[\s]+", " ", value)
+    else:
+        value = re.sub(r"[-\s]+", "-", value)
+    return value
+
 
 getFileList = lambda dirPath: [
     x for x in dirPath.iterdir() if x.is_file() and ".info.json" in x.name
@@ -85,103 +137,115 @@ def HMSToMS(time):
     return ":".join(timeStr)
 
 
-def main(pargs):
+def getJson(file):
+    with open(file, "r", encoding="utf-8") as f:
+        return json.loads(f.read())
 
-    dirPath = pargs.dir.resolve()
 
-    fileList = getFileList(dirPath)
+pargs = parseArgs()
 
-    if not fileList:
-        print("Nothing to do.")
-        sys.exit()
+dirPath = pargs.dir.resolve()
 
-    for file in fileList:
+fileList = sorted(getFileList(dirPath), key=lambda k: nSort(str(k.stem)))
 
-        baseName = str(file.name).replace(".info.json", "")
+if not fileList:
+    print("Nothing to do.")
+    sys.exit()
 
-        m4aFile = dirPath.joinpath(f"{baseName}.m4a")
+for file in fileList:
 
-        if not m4aFile.exists():
-            print(f"\n\n\nNo matching m4a file found for {file}")
-            continue
+    baseName = str(file.name).replace(".info.json", "")
 
-        with open(file, "r", encoding="utf-8") as f:
-            js = json.loads(f.read())
+    m4aFile = dirPath.joinpath(f"{baseName}.m4a")
 
-        artist = js["creator"] or js["uploader"]
+    if not m4aFile.exists():
+        print(f"\n\n\nNo matching m4a file found for {file}")
+        continue
 
-        album = js["title"]
+    js = getJson(file)
 
-        extractDirName = slugifyP(album)
+    if pargs.fn_tags:
+        tagName = baseName.rsplit("-", 1)[0].strip()
+        artist = slugify(tagName.split(" - ")[0].strip())
+        album = slugify(tagName.split(" - ")[1].strip()) or artist
+    else:
+        artist = slugify(js["creator"] or js["uploader"])
+        album = slugify(js["title"])
 
-        if not pargs.no_write:
-            extractDir = makeTargetDirs(extractDirName, dirPath)
+    logsDir = makeTargetDirs("logs", dirPath)
 
+    log = open(logsDir.joinpath(f"{baseName}.log"), "w")
+
+    printLogP = fn.partial(printLog, logRef=log)
+    printLogP("\n\n==============================")
+    printLogP(f"\n\nProcessing {album}")
+
+    if not isinstance(js["chapters"], Iterable):
+        printLogP(f"\n\n\nSkipping {album}, Chapters info not found.")
+        continue
+
+    if not pargs.no_write:
         if pargs.gen_cue:
             cue = dirPath.joinpath(f"{baseName}.cue")
             with open(cue, "w") as f:
                 f.write(f'\nPERFORMER "{artist}"')
                 f.write(f'\nTITLE "{album}"')
-                f.write(f'\nFILE "{m4aFile}" AAC')
+                f.write(f'\nFILE "{m4aFile.name}" AAC')
+        else:
+            artistDir = makeTargetDirs(artist, dirPath)
+            extractDir = makeTargetDirs(album, artistDir)
+            printLogP(f"\nOutput directory name: {extractDir}")
 
-        logsDir = makeTargetDirs("logs", dirPath)
+    for i, chapter in enumerate(js["chapters"]):
+        startTime = secondsToHMS(chapter["start_time"])
+        endTime = secondsToHMS(chapter["end_time"])
+        title = slugify(chapter["title"])
+        track = i + 1
+        fileName = f"{track}. {title}.m4a"
+        printLogP("\n\n------------------------------")
+        printLogP(f"\n\nProcessing {title} from {startTime} to {endTime}")
+        if pargs.no_write:
+            continue
 
-        with open(logsDir.joinpath(f"{baseName}.log"), "w") as log:
-            printLogP = fn.partial(printLog, logRef=log)
-            printLogP("\n\n==============================")
-            printLogP(f"\n\nProcessing {album}")
-            printLogP(f"\nOutput directory name: {extractDirName}")
+        if pargs.gen_cue:
+            with open(cue, "a") as f:
+                f.write(f"\n  TRACK {str(track).zfill(2)} AUDIO")
+                f.write(f'\n    TITLE "{title}"')
+                f.write(f"\n    INDEX 01 {HMSToMS(startTime)}:00 ")
+        else:
+            printLogP(f"\nOutput file name: {fileName}")
+            out = subprocess.check_output(
+                [
+                    "ffmpeg",
+                    "-ss",
+                    startTime,
+                    "-to",
+                    endTime,  # --ss -to needs to be prior to -i
+                    "-i",
+                    m4aFile,
+                    "-c:a",
+                    "copy",
+                    "-metadata",
+                    f"track={track}",
+                    "-metadata",
+                    f"title={title}",
+                    "-metadata",
+                    f"artist={artist}",
+                    "-metadata",
+                    f"album_artist={artist}",
+                    "-metadata",
+                    f"album={album}",
+                    "-loglevel",
+                    "warning",
+                    path.join(extractDir, fileName),
+                ]
+            ).decode("utf-8")
+            printLogP(out)
 
-            if not isinstance(js["chapters"], Iterable):
-                printLogP(f"\n\n\nSkipping {album}, Chapters info not found.")
-                continue
-
-            for i, chapter in enumerate(js["chapters"]):
-                startTime = secondsToHMS(chapter["start_time"])
-                endTime = secondsToHMS(chapter["end_time"])
-                title = chapter["title"]
-                track = i + 1
-                fileName = f"{track}. {slugifyP(title)}.m4a"
-                printLogP("\n\n------------------------------")
-                printLogP(f"\n\nProcessing {title} from {startTime} to {endTime}")
-                printLogP(f"\nOutput file name: {fileName}")
-                if not pargs.no_write:
-                    if pargs.gen_cue:
-                        with open(cue, "a") as f:
-                            f.write(f"\n  TRACK {str(track).zfill(2)} AUDIO")
-                            f.write(f'\n    TITLE "{title}"')
-                            f.write(f"\n    INDEX 01 {HMSToMS(startTime)}:00 ")
-                    else:
-                        out = subprocess.check_output(  # check output
-                            [
-                                "ffmpeg",
-                                "-ss",
-                                startTime,
-                                "-to",
-                                endTime,  # --ss -to need to be prior to -i
-                                "-i",
-                                m4aFile,
-                                "-c:a",
-                                "copy",
-                                "-metadata",
-                                f"track={track}",
-                                "-metadata",
-                                f"title={title}",
-                                "-metadata",
-                                f"artist={artist}",
-                                "-metadata",
-                                f"album_artist={artist}",
-                                "-metadata",
-                                f"album={album}",
-                                "-loglevel",
-                                "warning",
-                                path.join(extractDir, fileName),
-                            ]
-                        ).decode("utf-8")
-                        printLogP(out)
-        input("Press any key to continue processing.")
-
-
-# inp = input(f'\n\nCurren Album: {album}\nInput c to continue, s to skip.')
-
-main(parseArgs())
+    log.close()
+    if pargs.wait:
+        wait(pargs.wait)
+    else:
+        choice = getInput()
+        if choice == "e":
+            break
