@@ -106,7 +106,7 @@ def slugify(value, replace={}, keepSpace=True):
     Adapted from django.utils.text.slugify
     https://docs.djangoproject.com/en/3.0/_modules/django/utils/text/#slugify
     """
-    replace.update({"[": "(", "]": ")", ":": "_"})
+    replace.update({"[": "(", "]": ")", ":": "_", "()": ""})
     value = str(value)
     value = (
         unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
